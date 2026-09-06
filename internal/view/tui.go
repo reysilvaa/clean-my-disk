@@ -17,6 +17,7 @@ type state int
 
 const (
 	stateSelect state = iota
+	stateConfirm
 	stateRunning
 	stateDone
 )
@@ -37,6 +38,12 @@ type logMsg struct {
 type doneMsg struct {
 	elapsed time.Duration
 	freed   int64
+}
+
+type catMsg struct {
+	cat   int
+	freed int64
+	fails int64
 }
 
 type scanMsg struct {
@@ -60,6 +67,8 @@ type Model struct {
 	totalTasks     int
 	completedTasks int
 	currentAction  string
+	freedByCat     []int64
+	failByCat      []int64
 	homeDir        string
 	drives         []model.Drive
 	isAdmin        bool
@@ -139,6 +148,8 @@ func NewModel() Model {
 		drives:       snap.Drives,
 		isAdmin:      snap.IsAdmin,
 		items:        items,
+		freedByCat:   make([]int64, len(items)),
+		failByCat:    make([]int64, len(items)),
 		sub:          make(chan tea.Msg, 100),
 		scrollOffset: 0,
 	}
@@ -287,6 +298,51 @@ func (m Model) triggerRun() (tea.Model, tea.Cmd) {
 	)
 }
 
+func (m Model) anySelected() bool {
+	for _, it := range m.items {
+		if it.selected {
+			return true
+		}
+	}
+	return false
+}
+
+func (m Model) selectedCount() int {
+	n := 0
+	for _, it := range m.items {
+		if it.selected {
+			n++
+		}
+	}
+	return n
+}
+
+func (m Model) selectedEstimate() int64 {
+	var total int64
+	for i, it := range m.items {
+		if it.selected && m.estSizes != nil && i < len(m.estSizes) {
+			total += m.estSizes[i]
+		}
+	}
+	return total
+}
+
+func (m Model) freedSoFar() int64 {
+	var total int64
+	for _, f := range m.freedByCat {
+		total += f
+	}
+	return total
+}
+
+func (m Model) failsSoFar() int64 {
+	var total int64
+	for _, f := range m.failByCat {
+		total += f
+	}
+	return total
+}
+
 func (m Model) inspectorLines(idx int) []string {
 	if idx < 0 || idx >= len(m.items) {
 		idx = 0
@@ -355,6 +411,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q", "esc":
+			if m.state == stateConfirm {
+				m.state = stateSelect
+				return m, nil
+			}
 			return m, tea.Quit
 
 		case "up", "k":
@@ -422,6 +482,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			switch m.state {
 			case stateSelect:
+				if !m.dryRun && m.anySelected() {
+					m.state = stateConfirm
+					return m, nil
+				}
+				return m.triggerRun()
+			case stateConfirm:
 				return m.triggerRun()
 			case stateDone:
 				return m, tea.Quit
@@ -541,6 +607,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+	case catMsg:
+		if msg.cat >= 0 && msg.cat < len(m.freedByCat) {
+			m.freedByCat[msg.cat] += msg.freed
+			m.failByCat[msg.cat] += msg.fails
+		}
+		if m.state == stateRunning {
+			return m, waitForMsg(m.sub)
+		}
+
 	case scanMsg:
 		m.estSizes = msg.sizes
 		if m.state == stateRunning {
@@ -581,27 +656,32 @@ func (m Model) startCleaning() tea.Cmd {
 				m.sub <- logMsg{target: target, status: status}
 			}
 
-			if len(m.items) > 0 && m.items[0].selected {
-				s.RunTier1Regenerable()
+			runSeg := func(cat int, fn func(*service.Service)) {
+				beforeF := s.TotalFreed.Load()
+				beforeX := s.Failures.Load()
+				fn(s)
+				m.sub <- catMsg{cat: cat, freed: s.TotalFreed.Load() - beforeF, fails: s.Failures.Load() - beforeX}
 			}
-			if len(m.items) > 1 && m.items[1].selected {
-				s.RunTier1Browsers()
+
+			segments := []struct {
+				selected bool
+				run      func(*service.Service)
+			}{
+				{len(m.items) > 0 && m.items[0].selected, (*service.Service).RunTier1Regenerable},
+				{len(m.items) > 1 && m.items[1].selected, (*service.Service).RunTier1Browsers},
+				{len(m.items) > 2 && m.items[2].selected, (*service.Service).RunTier1Updaters},
+				{len(m.items) > 3 && m.items[3].selected, (*service.Service).RunTier2},
+				{len(m.items) > 4 && m.items[4].selected, (*service.Service).RunTier3},
+				{len(m.items) > 5 && m.items[5].selected, (*service.Service).RecycleBin},
 			}
-			if len(m.items) > 2 && m.items[2].selected {
-				s.RunTier1Updaters()
-			}
-			if len(m.items) > 3 && m.items[3].selected {
-				s.RunTier2()
-			}
-			if len(m.items) > 4 && m.items[4].selected {
-				s.RunTier3()
-			}
-			if len(m.items) > 5 && m.items[5].selected {
-				s.RecycleBin()
+			for i, seg := range segments {
+				if seg.selected {
+					runSeg(i, seg.run)
+				}
 			}
 			if len(m.items) > 6 && m.items[6].selected {
 				cfg := config.Load(m.homeDir)
-				s.RunExtras(cfg.ExtraPaths)
+				runSeg(6, func(sv *service.Service) { sv.RunExtras(cfg.ExtraPaths) })
 			}
 
 			m.sub <- doneMsg{
@@ -710,6 +790,22 @@ func (m Model) View() string {
 			out.WriteString("\n")
 		}
 
+		if n := m.selectedCount(); n > 0 {
+			sumLine := fmt.Sprintf("Terpilih: %d item", n)
+			if m.lang == "en" {
+				sumLine = fmt.Sprintf("Selected: %d items", n)
+			}
+			if m.estSizes != nil {
+				sumLine += fmt.Sprintf(" · Estimasi ~%s", model.HumanSize(m.selectedEstimate()))
+				if m.lang == "en" {
+					sumLine = fmt.Sprintf("Selected: %d items · Estimate ~%s", n, model.HumanSize(m.selectedEstimate()))
+				}
+			}
+			out.WriteString("  ")
+			out.WriteString(itemDesc.Render(sumLine))
+			out.WriteString("\n")
+		}
+
 		out.WriteString("\n  ")
 		out.WriteString(divLine)
 		out.WriteString("\n  ")
@@ -780,6 +876,43 @@ func (m Model) View() string {
 		}
 		out.WriteString("\n\n")
 
+	case stateConfirm:
+		confirmHdr := "Konfirmasi pembersihan"
+		if m.lang == "en" {
+			confirmHdr = "Confirm cleaning"
+		}
+		out.WriteString(successCheck.Render("? ") + sectionHeader.Render(confirmHdr))
+		out.WriteString("\n\n  ")
+
+		var clines []string
+		clines = append(clines, badgeLive.Render("Mode: Live — menghapus permanen"))
+		if m.lang == "en" {
+			clines = append(clines, badgeLive.Render("Mode: Live — permanent deletion"))
+		}
+		n := m.selectedCount()
+		clines = append(clines, statusValue.Render(fmt.Sprintf("%d target terpilih", n)))
+		if m.lang == "en" {
+			clines = append(clines, statusValue.Render(fmt.Sprintf("%d targets selected", n)))
+		}
+		if m.estSizes != nil {
+			clines = append(clines, statusValue.Render("Estimasi ~"+model.HumanSize(m.selectedEstimate())))
+			if m.lang == "en" {
+				clines = append(clines, statusValue.Render("Estimate ~"+model.HumanSize(m.selectedEstimate())))
+			}
+		}
+		clines = append(clines, "")
+		confirmHint := "Enter = jalankan bersihkan · Esc = batal"
+		if m.lang == "en" {
+			confirmHint = "Enter = run cleaner · Esc = cancel"
+		}
+		clines = append(clines, btnAccent.Render(confirmHint))
+		boxW := w - 4
+		if boxW > 60 {
+			boxW = 60
+		}
+		out.WriteString(indent(cardBox.Copy().Width(boxW).Render(strings.Join(clines, "\n")), 2))
+		out.WriteString("\n\n")
+
 	case stateRunning:
 		out.WriteString("  ")
 		runHdr := "Sedang membersihkan cache..."
@@ -830,9 +963,15 @@ func (m Model) View() string {
 		out.WriteString("\n  ")
 		out.WriteString(divLine)
 		out.WriteString("\n  ")
-		runSub := "Menjalankan operasi I/O paralel goroutines... (scroll/panah untuk log)"
+		liveLine := fmt.Sprintf("✓ Terbebas ~%s · %d gagal · %s", model.HumanSize(m.freedSoFar()), m.failsSoFar(), m.currentAction)
 		if m.lang == "en" {
-			runSub = "Parallel I/O goroutines in progress... (scroll/arrows for logs)"
+			liveLine = fmt.Sprintf("✓ Freed ~%s · %d failed · %s", model.HumanSize(m.freedSoFar()), m.failsSoFar(), m.currentAction)
+		}
+		out.WriteString(liveLine)
+		out.WriteString("\n  ")
+		runSub := "scroll/panah untuk log · q untuk keluar"
+		if m.lang == "en" {
+			runSub = "scroll/arrows for logs · q to quit"
 		}
 		out.WriteString(footerDesc.Render(runSub))
 		out.WriteString("\n\n")
@@ -867,6 +1006,35 @@ func (m Model) View() string {
 
 		out.WriteString(indent(statCards, 2))
 		out.WriteString("\n\n")
+
+		if m.freedSoFar() > 0 || m.failsSoFar() > 0 {
+			brkHdr := "Rincian per kategori:"
+			if m.lang == "en" {
+				brkHdr = "Breakdown by category:"
+			}
+			out.WriteString("  ")
+			out.WriteString(sectionHeader.Render(brkHdr))
+			out.WriteString("\n")
+			for i, it := range m.items {
+				if m.freedByCat == nil || i >= len(m.freedByCat) || (m.freedByCat[i] == 0 && m.failByCat[i] == 0) {
+					continue
+				}
+				title := it.title
+				if len(title) > 30 {
+					title = title[:27] + "..."
+				}
+				row := fmt.Sprintf("  %-30s ~%s", title, model.HumanSize(m.freedByCat[i]))
+				if m.failByCat[i] > 0 {
+					row += fmt.Sprintf(" · %d gagal", m.failByCat[i])
+					if m.lang == "en" {
+						row = fmt.Sprintf("  %-30s ~%s · %d failed", title, model.HumanSize(m.freedByCat[i]), m.failByCat[i])
+					}
+				}
+				out.WriteString(itemDesc.Render(row))
+				out.WriteString("\n")
+			}
+			out.WriteString("\n")
+		}
 
 		displayLogs := m.logs
 		if len(displayLogs) > 10 {

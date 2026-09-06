@@ -117,6 +117,128 @@ func TestEnterStartsRunning(t *testing.T) {
 	_ = cmd
 }
 
+func TestEnterLiveAsksConfirm(t *testing.T) {
+	m := NewModel()
+	if m.dryRun {
+		t.Fatal("default harus Live")
+	}
+	if !m.anySelected() {
+		t.Fatal("harus ada item terpilih default")
+	}
+
+	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mm.(Model)
+	if m.state != stateConfirm {
+		t.Errorf("enter Live harus ke stateConfirm, got %v", m.state)
+	}
+
+	mm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mm.(Model)
+	if m.state != stateRunning {
+		t.Errorf("enter di konfirmasi harus menjalankan, got %v", m.state)
+	}
+	_ = cmd
+}
+
+func TestConfirmEscCancels(t *testing.T) {
+	m := NewModel()
+	before := m.items[0].selected
+
+	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mm.(Model)
+	if m.state != stateConfirm {
+		t.Fatalf("harus stateConfirm, got %v", m.state)
+	}
+
+	mm, _ = m.Update(keyRunes('q'))
+	m = mm.(Model)
+	if m.state != stateSelect {
+		t.Errorf("esc/q harus batal ke stateSelect, got %v", m.state)
+	}
+	if m.items[0].selected != before {
+		t.Error("pilihan tidak boleh berubah saat batal")
+	}
+}
+
+func TestDryRunEnterRunsDirectly(t *testing.T) {
+	m := NewModel()
+	m.dryRun = true
+
+	mm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mm.(Model)
+	if m.state != stateRunning {
+		t.Errorf("enter dry-run harus langsung running, got %v", m.state)
+	}
+	_ = cmd
+}
+
+func TestConfirmViewRenders(t *testing.T) {
+	m := NewModel()
+	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mm.(Model)
+	v := m.View()
+	for _, want := range []string{"Konfirmasi pembersihan", "Mode: Live", "Enter = jalankan"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("View confirm harus memuat %q", want)
+		}
+	}
+}
+
+func TestSelectedEstimateShown(t *testing.T) {
+	m := NewModel()
+	sz := make([]int64, len(m.items))
+	sz[0] = 2 << 20
+	sz[1] = 1 << 20
+	m.estSizes = sz
+
+	v := m.View()
+	if !strings.Contains(v, "Terpilih: 3 item") {
+		t.Errorf("View harus menampilkan jumlah terpilih, got:\n%s", v)
+	}
+	if !strings.Contains(v, "3.0 MB") {
+		t.Errorf("agregat estimasi 3.0 MB harus tampil, got:\n%s", v)
+	}
+}
+
+func TestCatMsgUpdatesBreakdown(t *testing.T) {
+	m := NewModel()
+	mm, _ := m.Update(catMsg{cat: 0, freed: 2 << 20, fails: 1})
+	m = mm.(Model)
+	if m.freedByCat[0] != 2<<20 || m.failByCat[0] != 1 {
+		t.Errorf("catMsg tidak terakumulasi: %+v %+v", m.freedByCat, m.failByCat)
+	}
+	if m.freedSoFar() != 2<<20 || m.failsSoFar() != 1 {
+		t.Errorf("total freed/fails salah: %d %d", m.freedSoFar(), m.failsSoFar())
+	}
+}
+
+func TestDoneViewShowsBreakdown(t *testing.T) {
+	m := NewModel()
+	mm, _ := m.Update(catMsg{cat: 0, freed: 2 << 20, fails: 1})
+	m = mm.(Model)
+	mm, _ = m.Update(doneMsg{elapsed: time.Second, freed: 2 << 20})
+	m = mm.(Model)
+
+	v := m.View()
+	for _, want := range []string{"Rincian per kategori", "2.0 MB", "1 gagal"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("View done harus memuat %q", want)
+		}
+	}
+}
+
+func TestRunningViewShowsLiveFreed(t *testing.T) {
+	m := NewModel()
+	m.state = stateRunning
+	mm, _ := m.Update(catMsg{cat: 1, freed: 512})
+	m = mm.(Model)
+
+	v := m.View()
+	if !strings.Contains(v, "Terbebas ~512 B") {
+		t.Errorf("View running harus menampilkan freed live, got:\n%s", v)
+	}
+}
+
 func TestDoneMsgSetsFinalState(t *testing.T) {
 	m := NewModel()
 	mm, _ := m.Update(doneMsg{elapsed: 2 * time.Second, freed: 12345})
