@@ -25,8 +25,6 @@ func (p *pathList) Set(v string) error {
 	return nil
 }
 
-var Version = "1.5.0"
-
 type options struct {
 	extra          pathList
 	version        bool
@@ -66,7 +64,7 @@ func registerFlags(fs *flag.FlagSet, o *options) {
 }
 
 func printUsage(out io.Writer) {
-	fmt.Fprintf(out, "clean-my-disk v%s — Windows Cache & Junk Cleaner\n\n", Version)
+	fmt.Fprintf(out, "clean-my-disk v%s — Windows Cache & Junk Cleaner\n\n", model.Version)
 	fmt.Fprintln(out, "Penggunaan clean-my-disk:")
 	fmt.Fprintln(out, "  clean-my-disk.exe [flags]")
 	fmt.Fprintln(out)
@@ -114,7 +112,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if opts.version {
-		fmt.Fprintf(stdout, "clean-my-disk v%s\n", Version)
+		fmt.Fprintf(stdout, "clean-my-disk v%s\n", model.Version)
 		return 0
 	}
 

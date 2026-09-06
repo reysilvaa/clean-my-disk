@@ -621,7 +621,7 @@ func (m Model) View() string {
 	out.WriteString("  ")
 	out.WriteString(brandTitle.Render("clean-my-disk"))
 	out.WriteString(" ")
-	out.WriteString(brandVersion.Render("(v1.4.0)"))
+	out.WriteString(brandVersion.Render("(v" + model.Version + ")"))
 	out.WriteString(" · ")
 	out.WriteString(subTitle.Render("Windows Cache & Junk Cleaner"))
 	out.WriteByte('\n')

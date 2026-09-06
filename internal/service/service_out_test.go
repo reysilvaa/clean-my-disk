@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -39,6 +40,60 @@ func TestLogSilentWithoutOutAndOnLog(t *testing.T) {
 	n, _ := r.Read(buf)
 	if n > 0 {
 		t.Errorf("tanpa Out/OnLog tidak boleh mencetak ke stdout, got: %q", buf[:n])
+	}
+}
+
+func TestTier1WipesGoToolCaches(t *testing.T) {
+	home := t.TempDir()
+	for _, p := range []string{"AppData/Local/gopls", "AppData/Local/goimports"} {
+		dir := filepath.Join(home, filepath.FromSlash(p))
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "cache.bin"), []byte("junk"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s := New(true)
+	s.HomeDir = home
+	s.Lang = "id"
+	var buf bytes.Buffer
+	s.Out = &buf
+	s.RunTier1Regenerable()
+
+	out := buf.String()
+	for _, p := range []string{"gopls", "goimports"} {
+		if !strings.Contains(out, p) {
+			t.Errorf("dry-run harus menyebut %s, got:\n%s", p, out)
+		}
+	}
+}
+
+func TestTier1WipesBrowserDownloadCaches(t *testing.T) {
+	home := t.TempDir()
+	for _, p := range []string{"AppData/Local/ms-playwright", ".cache/puppeteer", ".cache/chrome-devtools-mcp"} {
+		dir := filepath.Join(home, filepath.FromSlash(p))
+		if err := os.MkdirAll(filepath.Join(dir, "chrome-headless-shell"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "chrome-headless-shell", "chrome.exe"), []byte("browser-binary"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s := New(true)
+	s.HomeDir = home
+	s.Lang = "en"
+	var buf bytes.Buffer
+	s.Out = &buf
+	s.RunTier1Regenerable()
+
+	out := buf.String()
+	for _, p := range []string{"puppeteer", "chrome-devtools-mcp", "ms-playwright"} {
+		if !strings.Contains(out, p) {
+			t.Errorf("dry-run harus menyebut %s, got:\n%s", p, out)
+		}
 	}
 }
 

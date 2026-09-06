@@ -11,10 +11,12 @@ import (
 
 func ScanAll(home string, extras []string) []model.ScanItem {
 	var items []model.ScanItem
+	seen := map[string]bool{}
 	add := func(p, kind string) {
-		if !repository.IsDir(p) {
+		if !repository.IsDir(p) || seen[p] {
 			return
 		}
+		seen[p] = true
 		items = append(items, model.ScanItem{Path: p, Size: repository.DirSize(p), Kind: kind})
 	}
 	for _, p := range config.DefaultTier1Paths(home) {

@@ -13,6 +13,8 @@ func keyRunes(r ...rune) tea.KeyMsg {
 }
 
 func TestNewModel(t *testing.T) {
+	t.Setenv("USERPROFILE", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
 	m := NewModel()
 	if m.state != stateSelect {
 		t.Errorf("state awal harus stateSelect, got %v", m.state)

@@ -27,6 +27,30 @@ func TestLoadExtraPaths(t *testing.T) {
 	}
 }
 
+func TestTier1IncludesToolCaches(t *testing.T) {
+	home := `C:\Users\Test`
+	paths := DefaultTier1Paths(home)
+	want := []string{
+		filepath.Join(home, "AppData/Local/gopls"),
+		filepath.Join(home, "AppData/Local/goimports"),
+		filepath.Join(home, ".cache/puppeteer"),
+		filepath.Join(home, ".cache/chrome-devtools-mcp"),
+		filepath.Join(home, "AppData/Local/ms-playwright"),
+	}
+	for _, w := range want {
+		found := false
+		for _, p := range paths {
+			if p == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("DefaultTier1Paths harus memuat %q", w)
+		}
+	}
+}
+
 func TestLoadKeepPatterns(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "cfg")

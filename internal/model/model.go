@@ -2,6 +2,8 @@ package model
 
 import "fmt"
 
+var Version = "1.5.0"
+
 const OldFileThresholdDays = 14
 
 type ScanItem struct {

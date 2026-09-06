@@ -41,7 +41,7 @@ go vet ./...
 Override versi saat rilis:
 
 ```bash
-go build -ldflags "-X clean-my-disk/internal/controller.Version=1.5.0" -o clean-my-disk.exe .
+go build -ldflags "-X clean-my-disk/internal/model.Version=1.5.0" -o clean-my-disk.exe .
 ```
 
 ## Pemakaian
