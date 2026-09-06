@@ -1,0 +1,36 @@
+# Binaries & build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.bin
+/dist/
+/bin/
+
+# Test artifacts & coverage
+*.test
+*.out
+*.prof
+coverage.txt
+
+# Go workspace
+go.work
+go.work.sum
+
+# IDE & editors
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*~
+
+# OS artifacts
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Local overrides / paths
+.clean-caches.paths
+.freebuff
