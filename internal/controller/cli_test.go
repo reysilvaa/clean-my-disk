@@ -8,7 +8,7 @@ func TestParseFlagsDefaults(t *testing.T) {
 		t.Fatalf("parseFlags(nil) error: %v", err)
 	}
 	if o.version || o.dryRun || o.dev || o.admin || o.recycle || o.all || o.cli || o.scan || o.json || o.trash ||
-		o.installSched || o.uninstallSched {
+		o.installSched || o.uninstallSched || o.bigFiles || o.notify {
 		t.Errorf("semua flag harus default false, got %+v", o)
 	}
 	if len(o.extra) != 0 || o.minSizeMB != 0 || o.days != 0 || o.lang != "id" {
@@ -28,11 +28,11 @@ func TestParseFlagsPathRepeatable(t *testing.T) {
 
 func TestParseFlagsSets(t *testing.T) {
 	o, err := parseFlags([]string{"--dry-run", "--all", "--recycle", "--cli", "--scan", "--json", "--trash",
-		"--min-size", "50", "--days", "30", "--lang", "en"})
+		"--big-files", "--notify", "--min-size", "50", "--days", "30", "--lang", "en"})
 	if err != nil {
 		t.Fatalf("parseFlags error: %v", err)
 	}
-	if !o.dryRun || !o.all || !o.recycle || !o.cli || !o.scan || !o.json || !o.trash {
+	if !o.dryRun || !o.all || !o.recycle || !o.cli || !o.scan || !o.json || !o.trash || !o.bigFiles || !o.notify {
 		t.Errorf("flag bool tidak terset: %+v", o)
 	}
 	if o.minSizeMB != 50 || o.days != 30 || o.lang != "en" {
@@ -41,6 +41,43 @@ func TestParseFlagsSets(t *testing.T) {
 	if o.dev || o.admin {
 		t.Errorf("flag dev/admin tidak boleh terset: %+v", o)
 	}
+}
+
+func TestParseBigSelection(t *testing.T) {
+	cases := []struct {
+		line string
+		max  int
+		want []int
+	}{
+		{"", 5, nil},
+		{"   \n", 5, nil},
+		{"a", 5, []int{0, 1, 2, 3, 4}},
+		{"all", 3, []int{0, 1, 2}},
+		{"q", 5, nil},
+		{"1", 5, []int{0}},
+		{"2, 4", 5, []int{1, 3}},
+		{"1 1 3", 5, []int{0, 2}},
+		{"0", 5, nil},
+		{"6", 5, nil},
+		{"2 x", 5, nil},
+	}
+	for _, c := range cases {
+		if got := parseBigSelection(c.line, c.max); !equalInts(got, c.want) {
+			t.Errorf("parseBigSelection(%q, %d) = %v, ingin %v", c.line, c.max, got, c.want)
+		}
+	}
+}
+
+func equalInts(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestParseFlagsRejectsUnknown(t *testing.T) {

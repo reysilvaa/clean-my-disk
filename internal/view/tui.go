@@ -2,10 +2,12 @@ package view
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"clean-my-disk/internal/config"
+	"clean-my-disk/internal/i18n"
 	"clean-my-disk/internal/model"
 	"clean-my-disk/internal/service"
 
@@ -18,6 +20,7 @@ type state int
 const (
 	stateSelect state = iota
 	stateConfirm
+	stateBigPick
 	stateRunning
 	stateDone
 )
@@ -28,6 +31,8 @@ type targetItem struct {
 	selected    bool
 	count       int
 	subPaths    []string
+	run         func(*service.Service)
+	risk        string
 }
 
 type logMsg struct {
@@ -47,7 +52,9 @@ type catMsg struct {
 }
 
 type scanMsg struct {
-	sizes []int64
+	tiers []int64
+	big   int64
+	files []model.BigFile
 }
 
 type Model struct {
@@ -70,6 +77,12 @@ type Model struct {
 	freedByCat     []int64
 	failByCat      []int64
 	homeDir        string
+	bigIdx         int
+	bigFiles       []model.BigFile
+	bigSel         []bool
+	bigCursor      int
+	bigPick        []model.BigFile
+	bigScanned     bool
 	drives         []model.Drive
 	isAdmin        bool
 	estSizes       []int64
@@ -88,6 +101,8 @@ func NewModel() Model {
 			selected:    true,
 			count:       len(config.DefaultTier1Paths(home)),
 			subPaths:    config.DefaultTier1Paths(home),
+			run:         (*service.Service).RunTier1Regenerable,
+			risk:        badgeLive.Render("Tier 1: Aman (Auto)"),
 		},
 		{
 			title:       "Tier 1: Browser Cache",
@@ -95,6 +110,8 @@ func NewModel() Model {
 			selected:    true,
 			count:       len(config.BrowserUserDirs(home)),
 			subPaths:    []string{"Chrome", "Edge", "Brave", "Firefox", "Opera", "Vivaldi", "Arc", "Zen"},
+			run:         (*service.Service).RunTier1Browsers,
+			risk:        badgeLive.Render("Tier 1: Aman (Auto)"),
 		},
 		{
 			title:       "Tier 1: Sampah Updater",
@@ -102,6 +119,8 @@ func NewModel() Model {
 			selected:    true,
 			count:       len(config.DefaultUpdaterPaths(home)),
 			subPaths:    config.DefaultUpdaterPaths(home),
+			run:         (*service.Service).RunTier1Updaters,
+			risk:        badgeLive.Render("Tier 1: Aman (Auto)"),
 		},
 		{
 			title:       "Tier 2: Dev Cache",
@@ -109,6 +128,8 @@ func NewModel() Model {
 			selected:    false,
 			count:       2,
 			subPaths:    []string{config.GradleCacheDir(home), config.CargoRegistryDir(home)},
+			run:         (*service.Service).RunTier2,
+			risk:        badgeDry.Render("Tier 2: Unduh Ulang"),
 		},
 		{
 			title:       "Tier 3: Sistem (Admin)",
@@ -116,6 +137,8 @@ func NewModel() Model {
 			selected:    false,
 			count:       len(config.DefaultTier3Paths()),
 			subPaths:    config.DefaultTier3Paths(),
+			run:         (*service.Service).RunTier3,
+			risk:        badgeAdmin.Render("Tier 3: Hak Admin"),
 		},
 		{
 			title:       "Recycle Bin",
@@ -123,6 +146,8 @@ func NewModel() Model {
 			selected:    false,
 			count:       1,
 			subPaths:    []string{"$Recycle.Bin (Semua Drive)"},
+			run:         (*service.Service).RecycleBin,
+			risk:        failCheck.Render("Recycle Bin (Purge)"),
 		},
 	}
 
@@ -133,8 +158,29 @@ func NewModel() Model {
 			selected:    false,
 			count:       len(cfg.ExtraPaths),
 			subPaths:    cfg.ExtraPaths,
+			run: func(s *service.Service) {
+				s.RunExtras(cfg.ExtraPaths)
+			},
+			risk: itemDesc.Render("Path Kustom"),
 		})
 	}
+
+	items = append(items, targetItem{
+		title:       "Big Files: Installer/Arsip",
+		description: "Downloads & Desktop: file besar & tua (>=100 MB, >30 hari)",
+		selected:    false,
+		count:       1,
+		subPaths: []string{
+			filepath.Join(home, "Downloads"),
+			filepath.Join(home, "Desktop"),
+			"filter: exe/msi/iso/zip/... >= 100 MB, umur > 30 hari",
+		},
+		run: func(s *service.Service) {
+			s.DeleteBigFiles(s.FindBigFiles(s.HomeDir))
+		},
+		risk: badgeDry.Render("Besar & Tua: hapus installer lama"),
+	})
+	bigIdx := len(items) - 1
 
 	return Model{
 		width:        92,
@@ -145,6 +191,7 @@ func NewModel() Model {
 		lang:         "id",
 		expanded:     -1,
 		homeDir:      home,
+		bigIdx:       bigIdx,
 		drives:       snap.Drives,
 		isAdmin:      snap.IsAdmin,
 		items:        items,
@@ -161,8 +208,63 @@ func (m Model) Init() tea.Cmd {
 
 func (m Model) startScan() tea.Cmd {
 	return func() tea.Msg {
-		return scanMsg{sizes: service.TierEstimates(m.homeDir)}
+		s := service.New(true)
+		s.HomeDir = m.homeDir
+		files := s.FindBigFiles(m.homeDir)
+		return scanMsg{
+			tiers: service.TierEstimates(m.homeDir),
+			big:   model.TotalBigFileSize(files),
+			files: files,
+		}
 	}
+}
+
+func estimateForItem(i int, tiers []int64, big int64, bigIdx int) int64 {
+	if i < 5 && tiers != nil && i < len(tiers) {
+		return tiers[i]
+	}
+	if bigIdx >= 0 && i == bigIdx {
+		return big
+	}
+	return 0
+}
+
+// bigNeedsPicker: item Big Files terpilih DAN scan sudah menemukan kandidat →
+// harus lewat layar pilih-per-file sebelum eksekusi.
+func (m Model) bigNeedsPicker() bool {
+	return m.bigIdx >= 0 && m.bigIdx < len(m.items) && m.items[m.bigIdx].selected && len(m.bigFiles) > 0
+}
+
+// selectedBigFiles: file yang dicentang di layar per-file. Selalu non-nil bila
+// picker pernah dibuka (nil menandakan "belum lewat picker").
+func (m Model) selectedBigFiles() []model.BigFile {
+	out := []model.BigFile{}
+	if m.bigFiles == nil || m.bigSel == nil {
+		return out
+	}
+	for i, on := range m.bigSel {
+		if on && i < len(m.bigFiles) {
+			out = append(out, m.bigFiles[i])
+		}
+	}
+	return out
+}
+
+func (m Model) bigChosenSize() int64 {
+	var total int64
+	for _, f := range m.selectedBigFiles() {
+		total += f.Size
+	}
+	return total
+}
+
+func (m Model) anySelectedExcluding(idx int) bool {
+	for i, it := range m.items {
+		if it.selected && i != idx {
+			return true
+		}
+	}
+	return false
 }
 
 func waitForMsg(sub chan tea.Msg) tea.Cmd {
@@ -365,18 +467,8 @@ func (m Model) inspectorLines(idx int) []string {
 	}
 	lines = append(lines, statusLabel.Render("Estimasi:  ")+percentStyle.Render("~"+estStr))
 
-	riskLabel := statusLabel.Render("Kebijakan: ")
-	switch idx {
-	case 0, 1, 2:
-		lines = append(lines, riskLabel+badgeLive.Render("Tier 1: Aman (Auto)"))
-	case 3:
-		lines = append(lines, riskLabel+badgeDry.Render("Tier 2: Unduh Ulang"))
-	case 4:
-		lines = append(lines, riskLabel+badgeAdmin.Render("Tier 3: Hak Admin"))
-	case 5:
-		lines = append(lines, riskLabel+failCheck.Render("Recycle Bin (Purge)"))
-	default:
-		lines = append(lines, riskLabel+itemDesc.Render("Path Kustom"))
+	if item.risk != "" {
+		lines = append(lines, statusLabel.Render("Kebijakan: ")+item.risk)
 	}
 
 	lines = append(lines, statusLabel.Render("Direktori:")+itemDesc.Render(fmt.Sprintf(" (%d lokasi)", len(item.subPaths))))
@@ -411,14 +503,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q", "esc":
-			if m.state == stateConfirm {
+			if m.state == stateConfirm || m.state == stateBigPick {
 				m.state = stateSelect
 				return m, nil
 			}
 			return m, tea.Quit
 
 		case "up", "k":
-			if m.state == stateSelect && m.cursor > 0 {
+			if m.state == stateBigPick {
+				if m.bigCursor > 0 {
+					m.bigCursor--
+				}
+			} else if m.state == stateSelect && m.cursor > 0 {
 				m.cursor--
 			} else if m.state == stateRunning || m.state == stateDone {
 				if m.scrollOffset < len(m.logs)-5 {
@@ -426,7 +522,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case "down", "j":
-			if m.state == stateSelect && m.cursor < len(m.items)-1 {
+			if m.state == stateBigPick {
+				if m.bigCursor < len(m.bigFiles)-1 {
+					m.bigCursor++
+				}
+			} else if m.state == stateSelect && m.cursor < len(m.items)-1 {
 				m.cursor++
 			} else if m.state == stateRunning || m.state == stateDone {
 				if m.scrollOffset > 0 {
@@ -434,11 +534,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case " ":
-			if m.state == stateSelect {
+			if m.state == stateBigPick {
+				if m.bigSel != nil && m.bigCursor >= 0 && m.bigCursor < len(m.bigSel) {
+					m.bigSel[m.bigCursor] = !m.bigSel[m.bigCursor]
+				}
+			} else if m.state == stateSelect {
 				m.items[m.cursor].selected = !m.items[m.cursor].selected
 			}
 		case "a", "A":
-			if m.state == stateSelect {
+			if m.state == stateBigPick {
+				for i := range m.bigSel {
+					m.bigSel[i] = true
+				}
+			} else if m.state == stateSelect {
 				allSelected := true
 				for _, it := range m.items {
 					if !it.selected {
@@ -450,7 +558,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.items[i].selected = !allSelected
 				}
 			}
-		case "1", "2", "3", "4", "5", "6", "7":
+		case "n", "N":
+			if m.state == stateBigPick {
+				for i := range m.bigSel {
+					m.bigSel[i] = false
+				}
+			}
+		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 			if m.state == stateSelect {
 				idx := int(msg.String()[0] - '1')
 				if idx >= 0 && idx < len(m.items) {
@@ -482,7 +596,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			switch m.state {
 			case stateSelect:
+				if m.bigNeedsPicker() {
+					m.state = stateBigPick
+					m.bigCursor = 0
+					return m, nil
+				}
 				if !m.dryRun && m.anySelected() {
+					m.state = stateConfirm
+					return m, nil
+				}
+				return m.triggerRun()
+			case stateBigPick:
+				picked := m.selectedBigFiles()
+				if !m.dryRun && len(picked) == 0 && !m.anySelectedExcluding(m.bigIdx) {
+					return m, nil // tak ada file dipilih & tak ada item lain: tetap di picker
+				}
+				m.bigPick = picked
+				if m.estSizes != nil && m.bigIdx >= 0 && m.bigIdx < len(m.estSizes) {
+					m.estSizes[m.bigIdx] = m.bigChosenSize()
+				}
+				if !m.dryRun {
 					m.state = stateConfirm
 					return m, nil
 				}
@@ -496,7 +629,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.MouseMsg:
 		if msg.Button == tea.MouseButtonWheelUp {
-			if m.state == stateSelect {
+			if m.state == stateBigPick {
+				if m.bigCursor > 0 {
+					m.bigCursor--
+				}
+			} else if m.state == stateSelect {
 				if m.cursor > 0 {
 					m.cursor--
 				}
@@ -508,7 +645,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.Button == tea.MouseButtonWheelDown {
-			if m.state == stateSelect {
+			if m.state == stateBigPick {
+				if m.bigCursor < len(m.bigFiles)-1 {
+					m.bigCursor++
+				}
+			} else if m.state == stateSelect {
 				if m.cursor < len(m.items)-1 {
 					m.cursor++
 				}
@@ -570,6 +711,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, tea.Quit
 					}
 					if msg.X >= 44 && msg.X < 60 {
+						if m.bigNeedsPicker() {
+							m.state = stateBigPick
+							m.bigCursor = 0
+							return m, nil
+						}
 						return m.triggerRun()
 					}
 					if msg.X >= 34 && msg.X < 44 {
@@ -617,7 +763,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case scanMsg:
-		m.estSizes = msg.sizes
+		m.bigFiles = msg.files
+		m.bigScanned = true
+		m.bigPick = nil
+		m.bigSel = make([]bool, len(msg.files))
+		m.estSizes = make([]int64, len(m.items))
+		for i := range m.items {
+			m.estSizes[i] = estimateForItem(i, msg.tiers, msg.big, m.bigIdx)
+		}
 		if m.state == stateRunning {
 			return m, waitForMsg(m.sub)
 		}
@@ -650,6 +803,7 @@ func (m Model) startCleaning() tea.Cmd {
 		go func() {
 			start := time.Now()
 			s := service.New(m.dryRun)
+			s.HomeDir = m.homeDir
 			s.Lang = m.lang
 			s.Trash = m.trash
 			s.OnLog = func(target, status string) {
@@ -663,25 +817,28 @@ func (m Model) startCleaning() tea.Cmd {
 				m.sub <- catMsg{cat: cat, freed: s.TotalFreed.Load() - beforeF, fails: s.Failures.Load() - beforeX}
 			}
 
-			segments := []struct {
-				selected bool
-				run      func(*service.Service)
-			}{
-				{len(m.items) > 0 && m.items[0].selected, (*service.Service).RunTier1Regenerable},
-				{len(m.items) > 1 && m.items[1].selected, (*service.Service).RunTier1Browsers},
-				{len(m.items) > 2 && m.items[2].selected, (*service.Service).RunTier1Updaters},
-				{len(m.items) > 3 && m.items[3].selected, (*service.Service).RunTier2},
-				{len(m.items) > 4 && m.items[4].selected, (*service.Service).RunTier3},
-				{len(m.items) > 5 && m.items[5].selected, (*service.Service).RecycleBin},
-			}
-			for i, seg := range segments {
-				if seg.selected {
-					runSeg(i, seg.run)
+			for i, it := range m.items {
+				if !it.selected {
+					continue
 				}
-			}
-			if len(m.items) > 6 && m.items[6].selected {
-				cfg := config.Load(m.homeDir)
-				runSeg(6, func(sv *service.Service) { sv.RunExtras(cfg.ExtraPaths) })
+				if i == m.bigIdx {
+					if m.bigPick != nil {
+						picked := m.bigPick
+						runSeg(i, func(sv *service.Service) { sv.DeleteBigFiles(picked) })
+					} else if !m.bigScanned {
+						runSeg(i, func(sv *service.Service) {
+							sv.Log("Big Files", i18n.T(m.lang, "big_pending"))
+						})
+					} else if len(m.bigFiles) == 0 {
+						// tak ada kandidat hasil scan awal: jangan hapus apa pun
+					} else if it.run != nil {
+						runSeg(i, it.run)
+					}
+					continue
+				}
+				if it.run != nil {
+					runSeg(i, it.run)
+				}
 			}
 
 			m.sub <- doneMsg{
@@ -911,6 +1068,131 @@ func (m Model) View() string {
 			boxW = 60
 		}
 		out.WriteString(indent(cardBox.Copy().Width(boxW).Render(strings.Join(clines, "\n")), 2))
+		out.WriteString("\n\n")
+
+	case stateBigPick:
+		out.WriteString("  ")
+		hdrText := "Pilih file besar untuk dihapus (per-file):"
+		if m.lang == "en" {
+			hdrText = "Pick big files to delete (per-file):"
+		}
+		out.WriteString(sectionHeader.Render(hdrText))
+		out.WriteString("\n\n  ")
+
+		if len(m.bigFiles) == 0 {
+			noteText := "(tidak ada kandidat file besar dari scan awal — tidak ada yang bisa dipilih)"
+			if m.lang == "en" {
+				noteText = "(no big-file candidates from the initial scan — nothing to pick)"
+			}
+			out.WriteString(itemDesc.Render(noteText))
+			out.WriteString("\n\n  ")
+			out.WriteString(btnAccent.Render(" ↵ Lanjut (Enter) — tidak ada file untuk dihapus  "))
+			out.WriteString("\n\n")
+			break
+		}
+
+		// jendela tampil: kursor selalu terlihat di tengah
+		const visible = 14
+		start := m.bigCursor - visible/2
+		if start < 0 {
+			start = 0
+		}
+		end := start + visible
+		if end > len(m.bigFiles) {
+			end = len(m.bigFiles)
+		}
+		if end-start < visible && start > 0 {
+			start = end - visible
+			if start < 0 {
+				start = 0
+			}
+		}
+
+		avail := w - 12
+		if avail < 44 {
+			avail = 44
+		}
+		pathW := avail - 36
+		if pathW < 20 {
+			pathW = 20
+		}
+
+		var rows []string
+		for i := start; i < end; i++ {
+			f := m.bigFiles[i]
+			cur := "  "
+			if i == m.bigCursor {
+				cur = cursorActive.Render("❯ ")
+			}
+			chk := checkInactive.Render("[ ]")
+			if m.bigSel != nil && i < len(m.bigSel) && m.bigSel[i] {
+				chk = checkActive.Render("[×]")
+			}
+			sizeS := fmt.Sprintf("%10s", model.HumanSize(f.Size))
+			dateS := f.Modified.Format("2006-01-02")
+			p := f.Path
+			if m.homeDir != "" && strings.HasPrefix(p, m.homeDir) {
+				p = "~" + p[len(m.homeDir):]
+			}
+			if len(p) > pathW {
+				half := (pathW - 3) / 2
+				p = p[:half] + "..." + p[len(p)-(pathW-3-half):]
+			}
+			rows = append(rows, fmt.Sprintf("%s%s %s %s  %s", cur, chk, statusValue.Render(sizeS), itemDesc.Render(dateS), itemDesc.Render(p)))
+		}
+
+		panel := cardBox.Copy().Width(w).Render(strings.Join(rows, "\n"))
+		out.WriteString(indent(panel, 2))
+		out.WriteString("\n")
+
+		nChosen := 0
+		var nSum int64
+		if m.bigSel != nil {
+			for i, on := range m.bigSel {
+				if on && i < len(m.bigFiles) {
+					nChosen++
+					nSum += m.bigFiles[i].Size
+				}
+			}
+		}
+		out.WriteString("  ")
+		sumText := fmt.Sprintf("Terpilih: %d/%d file · ~%s", nChosen, len(m.bigFiles), model.HumanSize(nSum))
+		if m.lang == "en" {
+			sumText = fmt.Sprintf("Selected: %d/%d files · ~%s", nChosen, len(m.bigFiles), model.HumanSize(nSum))
+		}
+		modeNote := ""
+		if m.dryRun {
+			modeNote = itemDesc.Render(" (dry-run — hanya rencana)")
+		} else if m.trash {
+			modeNote = itemDesc.Render(" (trash aktif → Recycle Bin)")
+		} else {
+			modeNote = failCheck.Render(" (LIVE — hapus permanen)")
+		}
+		out.WriteString(itemDesc.Render(sumText) + modeNote)
+		out.WriteString("\n\n  ")
+		out.WriteString(divLine)
+		out.WriteString("\n  ")
+		if w >= 78 {
+			navPick := fmt.Sprintf("%s %s   %s %s   %s %s   %s %s   %s %s",
+				btnNormal.Render("space"), footerDesc.Render("pilih"),
+				btnNormal.Render("a"), footerDesc.Render("semua"),
+				btnNormal.Render("n"), footerDesc.Render("kosong"),
+				btnAccent.Render("enter"), footerDesc.Render("lanjut"),
+				btnNormal.Render("q"), footerDesc.Render("kembali"),
+			)
+			out.WriteString(navPick)
+		} else {
+			navPick1 := fmt.Sprintf("%s %s   %s %s   %s %s",
+				btnNormal.Render("space"), footerDesc.Render("pilih"),
+				btnNormal.Render("a"), footerDesc.Render("semua"),
+				btnNormal.Render("n"), footerDesc.Render("kosong"),
+			)
+			navPick2 := fmt.Sprintf("%s %s   %s %s",
+				btnAccent.Render("enter"), footerDesc.Render("lanjut"),
+				btnNormal.Render("q"), footerDesc.Render("kembali"),
+			)
+			out.WriteString(navPick1 + "\n  " + navPick2)
+		}
 		out.WriteString("\n\n")
 
 	case stateRunning:

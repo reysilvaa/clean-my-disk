@@ -1,9 +1,12 @@
 package view
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"clean-my-disk/internal/model"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -19,8 +22,15 @@ func TestNewModel(t *testing.T) {
 	if m.state != stateSelect {
 		t.Errorf("state awal harus stateSelect, got %v", m.state)
 	}
-	if len(m.items) != 6 {
-		t.Fatalf("harus ada 6 item, got %d", len(m.items))
+	if len(m.items) != 7 {
+		t.Fatalf("harus ada 7 item, got %d", len(m.items))
+	}
+	last := m.items[len(m.items)-1]
+	if !strings.Contains(last.title, "Big Files") {
+		t.Errorf("item terakhir harus Big Files, got %q", last.title)
+	}
+	if last.selected {
+		t.Error("Big Files tidak boleh terpilih secara default")
 	}
 	for i, it := range m.items {
 		want := i < 3
@@ -449,6 +459,221 @@ func TestMouseClickDoneQuit(t *testing.T) {
 	_, cmd := m.Update(clickAny)
 	if cmd == nil {
 		t.Error("klik saat stateDone harus mengembalikan tea.Quit cmd")
+	}
+}
+
+func makeBigModel(t *testing.T, n int) Model {
+	t.Helper()
+	m := NewModel()
+	bigIdx := m.bigIdx
+	if bigIdx < 0 || bigIdx >= len(m.items) {
+		t.Fatalf("bigIdx tidak valid: %d", bigIdx)
+	}
+	files := make([]model.BigFile, 0, n)
+	sel := make([]bool, 0, n)
+	for i := 0; i < n; i++ {
+		files = append(files, model.BigFile{
+			Path:     fmt.Sprintf("C:\\dl\\setup-%d.exe", i),
+			Size:     int64(i+1) << 20,
+			Modified: time.Now().AddDate(0, 0, -40),
+			Kind:     "exe",
+		})
+		sel = append(sel, false)
+	}
+	m.bigFiles = files
+	m.bigSel = sel
+	m.bigScanned = true
+	m.estSizes = make([]int64, len(m.items))
+	m.items[bigIdx].selected = true
+	return m
+}
+
+func TestEnterBigFilesOpensPicker(t *testing.T) {
+	m := makeBigModel(t, 3)
+	for i := range m.items {
+		if i != m.bigIdx {
+			m.items[i].selected = false
+		}
+	}
+
+	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mm.(Model)
+	if m.state != stateBigPick {
+		t.Fatalf("enter dengan Big Files terpilih harus ke stateBigPick, got %v", m.state)
+	}
+	if len(m.bigSel) != 3 {
+		t.Errorf("bigSel harus 3, got %d", len(m.bigSel))
+	}
+}
+
+func TestBigPickerNoCandidatesSkips(t *testing.T) {
+	m := NewModel()
+	m.bigScanned = true
+	m.bigFiles = nil
+	m.bigSel = nil
+	m.items[m.bigIdx].selected = true
+	for i := range m.items {
+		if i != m.bigIdx {
+			m.items[i].selected = false
+		}
+	}
+
+	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mm.(Model)
+	if m.state != stateConfirm {
+		t.Errorf("tanpa kandidat harus langsung stateConfirm (live), got %v", m.state)
+	}
+}
+
+func TestBigPickerToggleKeys(t *testing.T) {
+	m := makeBigModel(t, 3)
+	m.state = stateBigPick
+
+	mm, _ := m.Update(keyRunes(' '))
+	m = mm.(Model)
+	if !m.bigSel[0] {
+		t.Error("space harus mencentang kandidat di cursor (0)")
+	}
+
+	mm, _ = m.Update(keyRunes(' '))
+	m = mm.(Model)
+	if m.bigSel[0] {
+		t.Error("space kedua harus membatalkan centang")
+	}
+
+	mm, _ = m.Update(keyRunes('a'))
+	m = mm.(Model)
+	for i, on := range m.bigSel {
+		if !on {
+			t.Errorf("'a' harus mencentang semua, bigSel[%d] = %v", i, on)
+		}
+	}
+
+	mm, _ = m.Update(keyRunes('n'))
+	m = mm.(Model)
+	for i, on := range m.bigSel {
+		if on {
+			t.Errorf("'n' harus mengosongkan semua, bigSel[%d] = %v", i, on)
+		}
+	}
+}
+
+func TestBigPickerArrowMovesCursor(t *testing.T) {
+	m := makeBigModel(t, 3)
+	m.state = stateBigPick
+
+	mm, _ := m.Update(keyRunes('j'))
+	m = mm.(Model)
+	if m.bigCursor != 1 {
+		t.Errorf("j harus memajukan bigCursor ke 1, got %d", m.bigCursor)
+	}
+	mm, _ = m.Update(keyRunes('k'))
+	m = mm.(Model)
+	if m.bigCursor != 0 {
+		t.Errorf("k harus memundurkan bigCursor ke 0, got %d", m.bigCursor)
+	}
+}
+
+func TestBigPickerEnterLiveConfirm(t *testing.T) {
+	m := makeBigModel(t, 3)
+	for i := range m.items {
+		if i != m.bigIdx {
+			m.items[i].selected = false
+		}
+	}
+	m.state = stateBigPick
+	m.bigSel = []bool{true, false, true}
+
+	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mm.(Model)
+	if m.state != stateConfirm {
+		t.Fatalf("enter picker (live) harus ke stateConfirm, got %v", m.state)
+	}
+	if len(m.bigPick) != 2 {
+		t.Errorf("bigPick harus 2 file terpilih, got %d", len(m.bigPick))
+	}
+	if m.estSizes[m.bigIdx] != (1<<20)+(3<<20) {
+		t.Errorf("estimasi bigIdx harus ukuran terpilih (file 0+2), got %d", m.estSizes[m.bigIdx])
+	}
+}
+
+func TestBigPickerEnterLiveNothingPicked(t *testing.T) {
+	m := makeBigModel(t, 3)
+	for i := range m.items {
+		if i != m.bigIdx {
+			m.items[i].selected = false
+		}
+	}
+	m.state = stateBigPick
+
+	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mm.(Model)
+	if m.state != stateBigPick {
+		t.Errorf("tanpa file terpilih & tanpa item lain harus tetap di picker, got %v", m.state)
+	}
+	if m.bigPick != nil {
+		t.Errorf("bigPick harus nil (belum konfirmasi), got %v", m.bigPick)
+	}
+}
+
+func TestBigPickerEnterDryRunRunsDirectly(t *testing.T) {
+	m := makeBigModel(t, 3)
+	m.dryRun = true
+	m.state = stateBigPick
+	m.bigSel = []bool{false, true, false}
+
+	mm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mm.(Model)
+	if m.state != stateRunning {
+		t.Fatalf("enter picker (dry-run) harus langsung stateRunning, got %v", m.state)
+	}
+	if len(m.bigPick) != 1 || m.bigPick[0].Path != m.bigFiles[1].Path {
+		t.Errorf("bigPick harus berisi file ke-2 saja, got %v", m.bigPick)
+	}
+	_ = cmd
+}
+
+func TestBigPickerEscReturnsToSelect(t *testing.T) {
+	m := makeBigModel(t, 3)
+	m.state = stateBigPick
+
+	mm, _ := m.Update(keyRunes('q'))
+	m = mm.(Model)
+	if m.state != stateSelect {
+		t.Errorf("q dari picker harus kembali ke stateSelect, got %v", m.state)
+	}
+}
+
+func TestBigPickerViewRenders(t *testing.T) {
+	m := makeBigModel(t, 3)
+	m.state = stateBigPick
+	m.bigSel = []bool{true, false, true}
+	v := m.View()
+	for _, want := range []string{"Pilih file besar untuk dihapus", "2/3", "setup-0.exe", "LIVE"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("View picker harus memuat %q, got:\n%s", want, v)
+		}
+	}
+}
+
+func TestMouseRunWithBigFilesOpensPicker(t *testing.T) {
+	m := makeBigModel(t, 2)
+	for i := range m.items {
+		if i != m.bigIdx {
+			m.items[i].selected = false
+		}
+	}
+	bottomRow := 5 + len(m.items) + 2
+	clickRun := tea.MouseMsg{
+		X:      50,
+		Y:      bottomRow + 3,
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonLeft,
+	}
+	mm, _ := m.Update(clickRun)
+	m = mm.(Model)
+	if m.state != stateBigPick {
+		t.Errorf("klik RUN dengan Big Files harus ke picker dulu, got %v", m.state)
 	}
 }
 

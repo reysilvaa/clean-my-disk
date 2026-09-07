@@ -153,6 +153,13 @@ func CargoRegistryDir(home string) string {
 	return filepath.Join(home, ".cargo/registry")
 }
 
+func BigFileRoots(home string) []string {
+	return []string{
+		filepath.Join(home, "Downloads"),
+		filepath.Join(home, "Desktop"),
+	}
+}
+
 const (
 	WindowsTempDir          = `C:\Windows\Temp`
 	NvidiaDownloaderDir     = `C:\ProgramData\NVIDIA Corporation\Downloader`

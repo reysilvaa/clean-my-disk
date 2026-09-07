@@ -45,6 +45,21 @@ func RenderScan(w io.Writer, items []model.ScanItem, lang string) {
 	}
 }
 
+func RenderBigFiles(w io.Writer, files []model.BigFile, lang string) {
+	fmt.Fprintln(w, i18n.T(lang, "big_hdr"))
+	if len(files) == 0 {
+		fmt.Fprintln(w, i18n.T(lang, "big_none"))
+		return
+	}
+	fmt.Fprintf(w, "%-4s %11s  %-10s  %s\n",
+		i18n.T(lang, "big_col_idx"), i18n.T(lang, "big_col_size"),
+		i18n.T(lang, "big_col_date"), i18n.T(lang, "big_col_path"))
+	for i, f := range files {
+		fmt.Fprintf(w, "%-4d %11s  %-10s  %s\n",
+			i+1, model.HumanSize(f.Size), f.Modified.Format("2006-01-02"), f.Path)
+	}
+}
+
 func RenderDone(w io.Writer, elapsed float64, freed, failures int64, dryRun bool, lang string) {
 	fmt.Fprintln(w, "----------------------------------------------")
 	fmt.Fprintf(w, i18n.T(lang, "done_seconds")+"\n", elapsed)

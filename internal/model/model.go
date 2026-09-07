@@ -1,10 +1,17 @@
 package model
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
-var Version = "1.5.0"
+var Version = "1.6.0"
 
-const OldFileThresholdDays = 14
+const (
+	OldFileThresholdDays = 14
+	BigFileOldDays       = 30
+	BigFileMinBytes      = 100 << 20
+)
 
 type ScanItem struct {
 	Path string
@@ -74,6 +81,26 @@ type ScanReport struct {
 	Items     []ScanItem
 	Total     int64
 	DriveFree int64
+}
+
+type BigFile struct {
+	Path     string
+	Size     int64
+	Modified time.Time
+	Kind     string
+}
+
+type BigFileReport struct {
+	Items []BigFile
+	Total int64
+}
+
+func TotalBigFileSize(items []BigFile) int64 {
+	var total int64
+	for _, it := range items {
+		total += it.Size
+	}
+	return total
 }
 
 func TotalScanSize(items []ScanItem) int64 {
